@@ -10,6 +10,20 @@ import "element-plus/dist/index.css";
 import * as ElementPlusIconsVue from "@element-plus/icons-vue";
 import zhCn from 'element-plus/es/locale/lang/zh-cn';
 
+// 全局增强 fetch：管理端鉴权用 cookie 会话，统一让所有请求默认带 cookie；
+// 401（未登录/会话过期）时清登录态并派发 '0e7-unauth' 事件，App.vue 监听后切回登录页。
+// 这样组件里现有的裸 fetch 调用无需逐个改造即可获得 cookie 携带与会话过期处理。
+const _origFetch = window.fetch;
+window.fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const merged: RequestInit = { credentials: "include", ...(init || {}) };
+  return _origFetch.call(window, input, merged).then((res: Response) => {
+    if (res.status === 401) {
+      localStorage.removeItem("0e7_admin_logged_in");
+      window.dispatchEvent(new CustomEvent("0e7-unauth"));
+    }
+    return res;
+  });
+}) as typeof window.fetch;
 
 const store = createStore({
   state() {

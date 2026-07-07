@@ -33,6 +33,10 @@ var (
 	Server_flag                   string
 	Server_pcap_zip               bool
 	Server_pcap_workers           int
+	Server_admin_port             string
+	Admin_password                string
+	Cs_token                      string
+	Cs_whitelist                  string
 	Client_mode                   bool
 	Client_name                   string
 	Client_id                     int
@@ -128,6 +132,15 @@ func Init_conf(configFile string) error {
 			Server_pcap_workers = 0 // 0 表示使用 CPU 核心数
 		}
 
+		// 管理端端口 / 管理端密码 / C/S 共享 token / C/S IP 白名单
+		Server_admin_port = section.Key("admin_port").String()
+		if Server_admin_port == "" {
+			Server_admin_port = "6103"
+		}
+		Admin_password = section.Key("admin_password").String()
+		Cs_token = section.Key("cs_token").String()
+		Cs_whitelist = section.Key("cs_whitelist").String()
+
 		// Proxy/cache settings (server side)
 		Proxy_cache_2xx_only, err = section.Key("proxy_cache_2xx_only").Bool()
 		if err != nil {
@@ -190,6 +203,11 @@ func Init_conf(configFile string) error {
 				section.Key("server_url").SetValue(Server_url)
 			}
 		}
+		// 纯 client 部署时从 [client] 读 cs_token；server 模式已读到则保留
+		if Cs_token == "" {
+			Cs_token = section.Key("cs_token").String()
+		}
+
 		Client_id, err = section.Key("id").Int()
 		if err != nil {
 			Client_id = 0
@@ -257,6 +275,11 @@ func Init_conf(configFile string) error {
 	if Client_mode && Server_url == "" {
 		log.Println("Server not found")
 		os.Exit(1)
+	}
+
+	// Server 模式下确保 cs_token / admin_password 存在（空则随机生成并回填 config.ini）
+	if Server_mode {
+		ensureSecrets(cfg)
 	}
 
 	err = cfg.SaveTo("config.ini")

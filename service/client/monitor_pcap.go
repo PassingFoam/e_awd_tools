@@ -2,6 +2,7 @@ package client
 
 import (
 	"0E7/service/config"
+	"0E7/utils"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,7 +10,6 @@ import (
 	"fmt"
 	"log"
 	"mime/multipart"
-	"net/http"
 	"sync"
 	"time"
 
@@ -156,7 +156,7 @@ func capture(device string, desc string, bpf string, timeout time.Duration, wg *
 
 			log.Printf("设备 %s 开始上传文件 %s，上传数据大小: %d 字节", device, fileName, body.Len())
 
-			request, err := http.NewRequest("POST", config.Server_url+"/webui/pcap_upload", body)
+			request, err := utils.NewCSRequest("POST", config.Server_url+"/api/pcap_upload", body)
 			if err != nil {
 				log.Printf("设备 %s 创建上传请求失败: %v", device, err)
 				return err

@@ -2,11 +2,11 @@ package client
 
 import (
 	"0E7/service/config"
+	"0E7/utils"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"net/url"
 	"strconv"
 	"time"
@@ -24,7 +24,7 @@ func monitor() {
 	values := url.Values{}
 	values.Set("client_id", fmt.Sprintf("%d", config.Client_id))
 	requestBody := bytes.NewBufferString(values.Encode())
-	request, err := http.NewRequest("POST", config.Server_url+"/api/monitor", requestBody)
+	request, err := utils.NewCSRequest("POST", config.Server_url+"/api/monitor", requestBody)
 	if err != nil {
 		log.Println(err)
 		return

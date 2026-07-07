@@ -2,6 +2,7 @@ package update
 
 import (
 	"0E7/service/config"
+	"0E7/utils"
 	"bytes"
 	"crypto/tls"
 	"errors"
@@ -34,7 +35,7 @@ func downloadFile(filepath string) error {
 	values.Set("platform", runtime.GOOS)
 	values.Set("arch", runtime.GOARCH)
 	requestBody := bytes.NewBufferString(values.Encode())
-	request, err := http.NewRequest("POST", config.Server_url+"/api/update", requestBody)
+	request, err := utils.NewCSRequest("POST", config.Server_url+"/api/update", requestBody)
 	if err != nil {
 		return err
 	}

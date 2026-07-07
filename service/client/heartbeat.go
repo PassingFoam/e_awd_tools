@@ -3,11 +3,11 @@ package client
 import (
 	"0E7/service/config"
 	"0E7/service/update"
+	"0E7/utils"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"net/url"
 	"runtime"
 	"time"
@@ -70,7 +70,7 @@ func heartbeat() {
 		values.Set("pcap", pcap)
 
 		requestBody := bytes.NewBufferString(values.Encode())
-		request, err := http.NewRequest("POST", config.Server_url+"/api/heartbeat", requestBody)
+		request, err := utils.NewCSRequest("POST", config.Server_url+"/api/heartbeat", requestBody)
 		if err != nil {
 			log.Println(err)
 			continue

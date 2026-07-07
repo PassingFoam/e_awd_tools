@@ -1,10 +1,40 @@
 <script setup lang="ts">
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import TabManager from './components/TabManager.vue'
+import Login from './components/Login.vue'
+import { getLoggedIn, setLoggedIn } from './utils/request'
+
+// 登录态：先以 localStorage 快速渲染（避免刷新闪烁），挂载后用 /api/admin/status 校正
+const loggedIn = ref(getLoggedIn())
+
+async function probe() {
+  try {
+    const res = await fetch('/api/admin/status', { credentials: 'include' })
+    const j = await res.json()
+    loggedIn.value = !!j.logged_in
+    setLoggedIn(loggedIn.value)
+  } catch {
+    loggedIn.value = false
+  }
+}
+
+function onUnauth() {
+  loggedIn.value = false
+}
+
+onMounted(() => {
+  probe()
+  window.addEventListener('0e7-unauth', onUnauth)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('0e7-unauth', onUnauth)
+})
 </script>
 
 <template>
   <div class="app-container">
-    <TabManager />
+    <Login v-if="!loggedIn" @logged="loggedIn = true" />
+    <TabManager v-else />
   </div>
 </template>
 

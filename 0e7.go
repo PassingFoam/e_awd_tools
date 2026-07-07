@@ -5,6 +5,7 @@ import (
 	"0E7/service/config"
 	flagService "0E7/service/flag"
 	"0E7/service/git"
+	"0E7/service/mw"
 	"0E7/service/pcap"
 	"0E7/service/proxy"
 	"0E7/service/route"
@@ -185,16 +186,19 @@ func main() {
 		cpuProfile   = flag.String("cpu-profile", "", "启用CPU性能分析并将结果写入指定文件")
 		memProfile   = flag.String("mem-profile", "", "启用内存性能分析并将结果写入指定文件")
 		logFile      = flag.String("log-file", "0e7.log", "指定日志文件路径")
+		adminPort    = flag.String("admin-port", "", "在运行时覆盖配置文件中的 server.admin_port")
 	)
 
 	// 支持短参数
 	flag.BoolVar(serverMode, "s", false, "以服务器模式启动（等同于 --server）")
 	flag.BoolVar(help, "h", false, "显示帮助信息（等同于 --help）")
 	flag.StringVar(serverPort, "p", "", "以短参数形式覆盖 server.port（等同于 --server-port）")
+	flag.StringVar(adminPort, "ap", "", "以短参数形式覆盖 server.admin_port（等同于 --admin-port）")
 
 	// 解析命令行参数
 	flag.Parse()
 	envServerPort := os.Getenv("OE7_SERVER_PORT")
+	envAdminPort := os.Getenv("OE7_ADMIN_PORT")
 
 	// 初始化性能分析
 	if *cpuProfile != "" {
@@ -306,6 +310,18 @@ func main() {
 		log.Printf("Server port overridden to %s", config.Server_port)
 	}
 
+	// 覆盖管理端端口（admin_port）
+	overrideAdminPort := ""
+	if adminPort != nil && *adminPort != "" {
+		overrideAdminPort = *adminPort
+	} else if envAdminPort != "" {
+		overrideAdminPort = envAdminPort
+	}
+	if overrideAdminPort != "" {
+		config.Server_admin_port = overrideAdminPort
+		log.Printf("Admin port overridden to %s", config.Server_admin_port)
+	}
+
 	// 日志归档：在启动前压缩现有日志文件
 	if _, err := os.Stat(*logFile); err == nil {
 		// 日志文件存在，进行归档
@@ -349,11 +365,8 @@ func main() {
 		gin.DefaultWriter = log.Writer()
 		gin.DefaultErrorWriter = log.Writer()
 
-		r_server := gin.New()
-
-		r_server.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
-			// 统一格式: 时间 | 状态码 | 耗时 | 客户端IP | 方法 路径 | 错误
-			// 使用紧凑格式，避免过多空格
+		// 统一 Gin 访问日志格式：时间 | 状态码 | 耗时 | 客户端IP | 方法 路径 | 错误
+		logFmt := func(param gin.LogFormatterParams) string {
 			return fmt.Sprintf("%s | %d | %v | %s | %s %s | %s\n",
 				param.TimeStamp.Format("2006/01/02 15:04:05"),
 				param.StatusCode,
@@ -363,22 +376,40 @@ func main() {
 				param.Path,
 				param.ErrorMessage,
 			)
-		}))
-		r_server.Use(gin.Recovery())
-		r_server.Use(etagMiddleware())
-		r_server.Use(gzip.Gzip(gzip.DefaultCompression))
-
-		log.Printf("Server listening on port: %s", config.Server_port)
+		}
 
 		// 检查 Git 命令（Git 服务需要）
 		git.CheckAndWarnGit()
 
-		route.Register(r_server)
-		webui.Register(r_server)
-		update.Register(r_server)
-		server.Register(r_server)
-		git.Register(r_server)
-		proxy.RegisterRoutes(r_server)
+		// -------------------- C/S engine（rCS）：client 程序连接的协议端口 --------------------
+		// 监听 config.Server_port（默认 6102），承载 /api/* 与 /api/pcap_upload。
+		// 不挂 etag/gzip：etag 会把整个响应体缓冲后算 sha256，对 /api/exploit_download、
+		// /api/update 这类大文件下载是内存放大隐患；C/S 响应多为小 JSON，gzip 收益微小。
+		rCS := gin.New()
+		rCS.Use(gin.LoggerWithFormatter(logFmt))
+		rCS.Use(gin.Recovery())
+		_ = rCS.SetTrustedProxies(nil) // 强制使用裸 TCP RemoteAddr，防止伪造 X-Forwarded-For 绕过 IP 白名单
+		rCS.Use(mw.CSWhitelist(), mw.CSToken()) // C/S 端口鉴权：先 IP 白名单，再 token 校验
+		route.Register(rCS)
+		update.Register(rCS)
+		webui.RegisterCS(rCS) // 跨界：client 自动上传 pcap 走 /api/pcap_upload
+
+		// -------------------- 管理端 engine（rAdmin）：管理员浏览器 --------------------
+		// 监听 config.Server_admin_port（默认 6103），承载 /webui/* 、/git/* 、/proxy/* 与 SPA。
+		rAdmin := gin.New()
+		rAdmin.Use(gin.LoggerWithFormatter(logFmt))
+		rAdmin.Use(gin.Recovery())
+		_ = rAdmin.SetTrustedProxies(nil)
+		rAdmin.Use(mw.AdminAuth()) // 管理端鉴权（cookie 优先，Basic 回落）；须在 etag/gzip 前，避免 401 被缓存/压缩
+		rAdmin.Use(etagMiddleware())
+		rAdmin.Use(gzip.Gzip(gzip.DefaultCompression))
+		webui.Register(rAdmin)
+		rAdmin.POST("/api/admin/login", mw.Login)
+		rAdmin.POST("/api/admin/logout", mw.Logout)
+		rAdmin.GET("/api/admin/status", mw.Status)
+		git.Register(rAdmin)
+		proxy.RegisterRoutes(rAdmin)
+		server.Register(rAdmin) // 仅启动 action 调度器（StartActionScheduler），不注册路由
 
 		// 启动flag检测器
 		_ = flagService.GetFlagDetector()
@@ -388,38 +419,45 @@ func main() {
 		fpStatic, _ := fs.Sub(f, "dist/static")
 
 		// 静态资源处理器，带缓存头
-		r_server.GET("/static/*filepath", func(c *gin.Context) {
+		rAdmin.GET("/static/*filepath", func(c *gin.Context) {
 			path := strings.TrimPrefix(c.Param("filepath"), "/")
 			serveStaticFile(c, fpStatic, path, true)
 		})
 
 		// 根路径返回 index.html，带缓存头
-		r_server.GET("/", func(c *gin.Context) {
+		rAdmin.GET("/", func(c *gin.Context) {
 			serveStaticFile(c, fp, "index.html", false)
 		})
 
-		if config.Server_tls {
-			r_server.RedirectTrailingSlash = true
-			r_server.RedirectFixedPath = true
-			log.Printf("Starting TLS server on port: %s", config.Server_port)
-			go func() {
-				if err := r_server.RunTLS(":"+config.Server_port, "cert/certificate.crt", "cert/private.key"); err != nil {
-					log.Printf("Failed to start TLS server on port %s: %v", config.Server_port, err)
-					runCleanup()
-					os.Exit(1)
-				}
-			}()
-		} else {
-			log.Printf("Starting HTTP server on port: %s", config.Server_port)
-			go func() {
-				if err := r_server.Run(":" + config.Server_port); err != nil {
-					log.Printf("Failed to start HTTP server on port %s: %v", config.Server_port, err)
-					runCleanup()
-					os.Exit(1)
-				}
-			}()
+		// -------------------- 启动两个 engine（并发 goroutine，TLS 证书复用 cert/*） --------------------
+		startEngine := func(r *gin.Engine, name, port string) {
+			if config.Server_tls {
+				r.RedirectTrailingSlash = true
+				r.RedirectFixedPath = true
+				log.Printf("Starting %s TLS server on port: %s", name, port)
+				go func() {
+					if err := r.RunTLS(":"+port, "cert/certificate.crt", "cert/private.key"); err != nil {
+						log.Printf("Failed to start %s TLS server on port %s: %v", name, port, err)
+						runCleanup()
+						os.Exit(1)
+					}
+				}()
+			} else {
+				log.Printf("Starting %s HTTP server on port: %s", name, port)
+				go func() {
+					if err := r.Run(":" + port); err != nil {
+						log.Printf("Failed to start %s HTTP server on port %s: %v", name, port, err)
+						runCleanup()
+						os.Exit(1)
+					}
+				}()
+			}
 		}
-		go udpcast.Udp_sent(config.Server_tls, config.Server_port)
+		log.Printf("Server listening — C/S port: %s, Admin port: %s (tls=%v)", config.Server_port, config.Server_admin_port, config.Server_tls)
+		startEngine(rCS, "C/S", config.Server_port)
+		startEngine(rAdmin, "Admin", config.Server_admin_port)
+
+		go udpcast.Udp_sent(config.Server_tls, config.Server_port) // 仍广播 C/S 端口，client 发现的就是它
 
 		pcap.SetFlagRegex(config.Server_flag)
 
@@ -469,6 +507,7 @@ func showHelp() {
 	fmt.Println("  0e7 --server, -s              # 服务器模式启动")
 	fmt.Println("  0e7 --server -config <file>   # 服务器模式启动并指定配置文件")
 	fmt.Println("  0e7 --server-port 6200        # 覆盖配置文件中的 server.port")
+	fmt.Println("  0e7 --admin-port 6203         # 覆盖配置文件中的 server.admin_port")
 	fmt.Println("  0e7 --cpu-profile cpu.prof    # 启用CPU性能分析输出文件")
 	fmt.Println("  0e7 --mem-profile mem.prof    # 启用内存性能分析输出文件")
 	fmt.Println("  0e7 --log-file custom.log    # 指定日志文件路径")
@@ -480,6 +519,7 @@ func showHelp() {
 	fmt.Println("  --server, -s                  以服务器模式启动")
 	fmt.Println("  --help, -h                    显示帮助信息")
 	fmt.Println("  --server-port, -p <port>      运行时覆盖 server.port（优先级高于配置）")
+	fmt.Println("  --admin-port, -ap <port>      运行时覆盖 server.admin_port（默认 6103）")
 	fmt.Println("  --install-guide               显示Windows依赖安装指南")
 	fmt.Println("  --cpu-profile <file>          启用CPU性能分析并写入指定文件")
 	fmt.Println("  --mem-profile <file>          启用内存性能分析并在退出时写入指定文件")
@@ -502,9 +542,10 @@ debug            = true
 
 [client]
 enable     = true
-id         = 
-name       = 
+id         =
+name       =
 server_url = http://remotehost:6102
+cs_token   =
 pypi       = https://pypi.tuna.tsinghua.edu.cn/simple
 update     = false
 worker     = 20
@@ -515,12 +556,16 @@ pcap_workers = 0
 [server]
 enable      = true
 port        = 6102
+admin_port  = 6103
+admin_password =
+cs_token    =
+cs_whitelist =
 db_engine   = sqlite3
 db_host     = localhost
 db_port     = 3306
-db_username = 
-db_password = 
-db_tables   = 
+db_username =
+db_password =
+db_tables   =
 server_url  = http://localhost:6102
 flag        = flag{.*}
 tls         = false
